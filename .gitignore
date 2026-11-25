@@ -1,0 +1,16 @@
+node_modules/
+.next/
+dist/
+playwright-report/
+.env*
+!.env.example
+*.tsbuildinfo
+next-env.d.ts
+.DS_Store
+
+.engine-tools/
+
+.engine-data/
+
+.agents/
+skills-lock.json

@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Hashpix Automation — функциональная карта</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; color: var(--foreground, CanvasText); font: 14px/1.5 var(--font-sans, system-ui, sans-serif); }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 1.25rem; }
+    h2 { font-size: 1rem; }
+    small { color: var(--muted-foreground, GrayText); }
+    .map { display: grid; grid-template-columns: minmax(128px, .8fr) minmax(0, 1.8fr) minmax(0, 1.35fr); gap: 16px; margin-block: 14px; }
+    .context { border-inline-start: 1px solid var(--border, GrayText); padding-inline-start: 16px; }
+    nav { display: grid; align-content: start; gap: 2px; }
+    button { font: inherit; color: inherit; background: transparent; border: 1px solid transparent; border-radius: var(--radius, 5px); text-align: start; padding: 6px 8px; }
+    button[aria-pressed="true"] { background: var(--secondary, ButtonFace); border-color: var(--border, GrayText); }
+    button:focus-visible { outline: 2px solid var(--ring, Highlight); }
+    ul { padding-inline-start: 19px; margin-block: 6px 0; }
+    li + li { margin-block-start: 5px; }
+    .choices { display: grid; gap: 3px; margin-block-start: 6px; }
+    .choices[hidden] { display: none; }
+    .choices button { border-color: var(--border, GrayText); }
+    footer { border-block-start: 1px solid var(--border, GrayText); padding-block-start: 10px; }
+    @media (max-width: 530px) {
+      .map { grid-template-columns: 1fr 1fr; gap: 12px; }
+      nav { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; }
+      .context { padding-inline-start: 10px; }
+    }
+    @media (pointer: coarse) { button { min-height: 44px; } }
+  </style>
+</head>
+<body>
+  <h1>Функциональная карта Hashpix Automation</h1>
+  <small>Выбери раздел слева. В «Устройствах» можно выбрать телефон и посмотреть его состояние.</small>
+  <div class="map">
+    <nav aria-label="Разделы Hashpix Automation"></nav>
+    <main aria-labelledby="workspace-heading">
+      <small>Рабочая область</small>
+      <h2 id="workspace-heading"></h2>
+      <ul id="workspace-items"></ul>
+      <div class="choices" id="device-examples" aria-label="Примеры устройств" role="group" hidden></div>
+    </main>
+    <aside class="context" aria-labelledby="inspector-heading" aria-live="polite">
+      <small>Правая панель</small>
+      <h2 id="inspector-heading"></h2>
+      <ul id="inspector-items"></ul>
+    </aside>
+  </div>
+  <footer>Ролик → проверка → согласование → очередь → публикация → подтверждение</footer>
+  <script>
+    const sections = [
+      ['Обзор', 'Что требует внимания', ['Устройства, требующие внимания', 'Запуски с ошибками и ожиданиями', 'Ближайшие публикации'], 'Выбранное событие', ['Причина и время', 'Связанный телефон, запуск или публикация', 'Доступное следующее действие']],
+      ['Устройства', 'Стена экранов / список', ['Фильтр по хосту, группе и состоянию', 'Все экраны в режиме наблюдения', 'Отдельный режим управления одним телефоном'], '', []],
+      ['Автоматизации', 'Библиотека / редактор', ['Поиск нод и добавление на холст', 'Граф с ветками успеха и ошибок', 'Проверка, тестовый запуск, активация версии'], 'Выбранная нода', ['Входы, параметры и выходы', 'Тайм-аут и поведение при ошибке', 'Результат тестового шага']],
+      ['Контент', 'Медиатека / согласование', ['Импорт файла или получение из Narezai', 'Превью, версии и проверка формата', 'Подготовка материала и текстов по каналам'], 'Выбранный ролик', ['Файл, источник и версия', 'Результаты проверок и примечания', 'Связанные черновики и публикации']],
+      ['Публикации', 'Очередь / календарь', ['Фильтры по каналу, аккаунту и статусу', 'Запланировать, перенести, отменить', 'Открыть задачу с ошибкой или неопределённым результатом'], 'Выбранная публикация', ['Аккаунт, файл, текст, дата и часовой пояс', 'API или ручное завершение', 'Состояние и внешний идентификатор']],
+      ['Запуски', 'История / выполнение', ['Фильтр по сценарию, версии и устройству', 'Хронология шагов и ожиданий', 'Остановка или повтор доступного шага'], 'Выбранный шаг', ['Входы и выходы без секретов', 'Ошибка, попытки и скриншот', 'Связанная публикация или устройство']],
+      ['Интеграции', 'Подключения', ['Narezai, каналы, внешние HTTP API', 'Подключение, проверка и обновление доступа', 'Статус и поддерживаемые операции'], 'Выбранное подключение', ['Доступные операции и затронутые сценарии', 'Последняя проверка и ошибка', 'Права подключения']],
+      ['Настройки', 'Хосты и параметры', ['Локальный хост, устройства и зависимости', 'Сеть и доступ к панели', 'Хранение, журналы и лимиты потоков'], 'Выбранный хост', ['ОС, версия драйверов и доступность', 'Подключённые устройства', 'Результаты диагностики']]
+    ];
+
+    const devices = [
+      ['Redmi · Готов', 'Redmi', ['Подключён по USB · экран доступен', 'Управление свободно', 'Открыть экран или выбрать сценарий']],
+      ['Android · Занят', 'Android', ['Подключён · просмотр доступен', 'Телефоном управляет запущенный сценарий', 'Перейти к выполнению']],
+      ['iPhone · Нет связи', 'iPhone', ['Подключение потеряно · сохранён последний кадр', 'Время последнего кадра видно', 'Открыть диагностику хоста']]
+    ];
+
+    const navigation = document.querySelector('nav');
+    const examples = document.querySelector('#device-examples');
+    const workspaceHeading = document.querySelector('#workspace-heading');
+    const workspaceItems = document.querySelector('#workspace-items');
+    const inspectorHeading = document.querySelector('#inspector-heading');
+    const inspectorItems = document.querySelector('#inspector-items');
+
+    function renderList(list, items) {
+      list.replaceChildren(...items.map((item) => {
+        const row = document.createElement('li');
+        row.textContent = item;
+        return row;
+      }));
+    }
+
+    function showInspector(title, items) {
+      inspectorHeading.textContent = title;
+      renderList(inspectorItems, items);
+    }
+
+    function selectDevice(index) {
+      const [, title, items] = devices[index];
+      [...examples.children].forEach((button, position) => button.setAttribute('aria-pressed', position === index));
+      showInspector(title, items);
+    }
+
+    function selectSection(index) {
+      const [label, title, items, inspectorTitle, inspectorDetails] = sections[index];
+      [...navigation.children].forEach((button, position) => button.setAttribute('aria-pressed', position === index));
+      workspaceHeading.textContent = title;
+      renderList(workspaceItems, items);
+      examples.hidden = label !== 'Устройства';
+      if (examples.hidden) showInspector(inspectorTitle, inspectorDetails);
+      else selectDevice(0);
+    }
+
+    function addChoice(group, label, onSelect) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', onSelect);
+      group.append(button);
+    }
+
+    sections.forEach(([label], index) => addChoice(navigation, label, () => selectSection(index)));
+    devices.forEach(([label], index) => addChoice(examples, label, () => selectDevice(index)));
+    selectSection(1);
+  </script>
+</body>
+</html>
