@@ -13,7 +13,7 @@ type Client = ReadableStreamDefaultController<Uint8Array>;
 
 class VideoSession {
   private clients = new Set<Client>();
-  private data = Buffer.alloc(0);
+  private data: Buffer = Buffer.alloc(0);
   private metadata = false;
   private config: Buffer | null = null;
   private gop: Buffer[] = [];
@@ -76,7 +76,7 @@ class VideoSession {
 
   private receive(chunk: Buffer) {
     if (this.closed) return;
-    this.data = Buffer.concat([this.data, chunk]);
+    this.data = this.data.length ? Buffer.concat([this.data, chunk]) : chunk;
     if (!this.metadata) {
       if (this.data.length < 12) return;
       if (this.data.toString("ascii", 0, 4) !== "h264") { this.close(); return; }

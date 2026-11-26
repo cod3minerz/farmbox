@@ -36,7 +36,7 @@ export function useAndroidInventory() {
       const attempt = ++request;
       if (!document.hidden) {
         try {
-          const response = await requestEngine(root, { signal: controller.signal, cache: "no-store" });
+          const response = await requestEngine(root, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]), cache: "no-store" });
           const data = await response.json() as AndroidInventory;
           if (!controller.signal.aborted && attempt === request) setInventory({ devices: data.devices, screens: data.screens ?? [], error: "", loaded: true });
         } catch (error) {
@@ -112,31 +112,73 @@ function ScreenControl({ target, device, screens, onSwitch, onClose }: {
 }) {
   const [error, setError] = useState("");
   const [changing, setChanging] = useState(false);
-  const sending = useRef(false);
+  const inputSession = useRef<{
+    lifetime: AbortController;
+    running: boolean;
+    gestures: { input: AndroidInput; queuedAt: number }[];
+  } | null>(null);
   const screen = target.screen ? screens.find((entry) => entry.id === target.screen && entry.serial === target.serial) : undefined;
   const available = device?.state === "ready" && (!target.screen || screen);
   const title = screen ? screenLabel(screen) : device?.model ?? "Экран телефона";
 
+  useEffect(() => {
+    const lifetime = new AbortController();
+    inputSession.current = { lifetime, running: false, gestures: [] };
+    return () => {
+      lifetime.abort();
+      inputSession.current = null;
+    };
+  }, [target.serial, target.screen]);
+
   async function send(input: AndroidInput) {
-    if (!available || sending.current) return;
-    sending.current = true;
+    const session = inputSession.current;
+    if (!available || !session || session.lifetime.signal.aborted) return;
+    if (changing) {
+      setError("Дождитесь завершения команды экрана.");
+      return;
+    }
+    if (session.gestures.length >= 3) {
+      setError("Дождитесь выполнения предыдущих жестов.");
+      return;
+    }
+    session.gestures.push({ input, queuedAt: performance.now() });
+    if (session.running) return;
+    session.running = true;
     setError("");
+    const { signal } = session.lifetime;
     try {
-      await requestEngine(devicePath(target.serial) + "/input" + (target.screen ? "?screen=" + target.screen : ""), {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
-      });
-    } catch (error) { setError(error instanceof Error ? error.message : "Команда не выполнена."); }
-    finally { sending.current = false; }
+      while (!signal.aborted && session.gestures.length) {
+        const gesture = session.gestures.shift()!;
+        if (performance.now() - gesture.queuedAt > 1000) {
+          setError("Телефон отвечал слишком долго. Повторите нажатие.");
+          continue;
+        }
+        await requestEngine(devicePath(target.serial) + "/input" + (target.screen ? "?screen=" + target.screen : ""), {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(gesture.input),
+          signal: AbortSignal.any([signal, AbortSignal.timeout(7000)]),
+        });
+      }
+    } catch (error) {
+      session.gestures.length = 0;
+      if (!signal.aborted) setError(error instanceof Error && error.name === "TimeoutError" ? "Движок не ответил на жест вовремя." :
+        error instanceof Error ? error.message : "Команда не выполнена.");
+    } finally {
+      session.running = false;
+    }
   }
 
   async function changeVirtual(method: "PATCH" | "DELETE") {
+    inputSession.current?.gestures.splice(0);
     setChanging(true);
     setError("");
     try {
-      await requestEngine(devicePath(target.serial) + "/screens/" + target.screen, { method });
+      await requestEngine(devicePath(target.serial) + "/screens/" + target.screen, { method, signal: AbortSignal.timeout(12000) });
       if (method === "DELETE") onClose();
       window.dispatchEvent(new Event(refreshEvent));
-    } catch (error) { setError(error instanceof Error ? error.message : "Команда не выполнена."); }
+    } catch (error) {
+      setError(error instanceof Error && error.name === "TimeoutError" ? "Движок не ответил вовремя. Повторите команду." :
+        error instanceof Error ? error.message : "Команда не выполнена.");
+    }
     finally { setChanging(false); }
   }
 
@@ -146,7 +188,7 @@ function ScreenControl({ target, device, screens, onSwitch, onClose }: {
     {available ? <>
       {options.length > 1 && <div className="device-control-selector"><SelectField label="Активный экран" options={options}
         value={target.screen ?? "main"} onChange={(value) => onSwitch({ serial: target.serial, screen: value === "main" ? undefined : value })} /></div>}
-      {screen?.awaitingConfirmation && <p className="device-control-note">Разблокируйте Redmi и, если MIUI покажет диалог, подтвердите запуск копии.</p>}
+      {screen?.awaitingConfirmation && <p className="device-control-note">Если MIUI покажет выбор приложения на основном экране телефона, подтвердите там запуск копии.</p>}
       <div className="android-control-screen"><AndroidVideo serial={target.serial} screen={target.screen} label={title} onGesture={(input) => void send(input)} /></div>
       {error && <p role="alert" className="muted">{error}</p>}
       <div className="device-control-actions">

@@ -7,9 +7,10 @@ import type { Run } from "@/lib/demo";
 export type ExecutionEdge = Edge<{ pulse?: string }, "smoothstep">;
 
 export function WorkflowTransition(props: EdgeProps<ExecutionEdge>) {
-  const [path] = getSmoothStepPath(props);
+  const pathOptions = { borderRadius: 18 };
+  const [path] = getSmoothStepPath({ ...props, ...pathOptions });
   return <>
-    <SmoothStepEdge {...props} />
+    <SmoothStepEdge {...props} pathOptions={pathOptions} />
     {props.data?.pulse && <path key={props.data.pulse} className="workflow-signal" d={path} pathLength={1} />}
   </>;
 }

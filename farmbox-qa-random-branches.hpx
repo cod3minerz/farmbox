@@ -1,0 +1,196 @@
+{
+  "format": "hashpix.workflow",
+  "version": 2,
+  "workflow": {
+    "name": "QA · Цикл и случайные ветки",
+    "repeat": false,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "action",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "data": {
+          "kind": "start",
+          "parameter": "",
+          "timeout": 10000
+        }
+      },
+      {
+        "id": "fixture",
+        "type": "action",
+        "position": {
+          "x": 256,
+          "y": 0
+        },
+        "data": {
+          "kind": "wait",
+          "parameter": "Тестовый макет",
+          "timeout": 10000
+        }
+      },
+      {
+        "id": "loop",
+        "type": "action",
+        "position": {
+          "x": 512,
+          "y": 0
+        },
+        "data": {
+          "kind": "loop",
+          "parameter": "",
+          "timeout": 10000,
+          "settings": {
+            "count": 8
+          }
+        }
+      },
+      {
+        "id": "random",
+        "type": "action",
+        "position": {
+          "x": 768,
+          "y": 0
+        },
+        "data": {
+          "kind": "randomNumber",
+          "parameter": "",
+          "timeout": 10000,
+          "logic": {
+            "variable": "sample",
+            "lower": "0",
+            "upper": "1",
+            "randomMode": "integer"
+          }
+        }
+      },
+      {
+        "id": "check",
+        "type": "action",
+        "position": {
+          "x": 1024,
+          "y": 0
+        },
+        "data": {
+          "kind": "condition",
+          "parameter": "true",
+          "timeout": 10000,
+          "logic": {
+            "variable": "sample",
+            "valueType": "number",
+            "operator": "eq",
+            "operand": "0"
+          }
+        }
+      },
+      {
+        "id": "case-a",
+        "type": "action",
+        "position": {
+          "x": 1280,
+          "y": -112
+        },
+        "data": {
+          "kind": "log",
+          "parameter": "Тестовая ветка A",
+          "timeout": 10000,
+          "logTone": "green"
+        }
+      },
+      {
+        "id": "case-b",
+        "type": "action",
+        "position": {
+          "x": 1280,
+          "y": 128
+        },
+        "data": {
+          "kind": "log",
+          "parameter": "Тестовая ветка B",
+          "timeout": 10000,
+          "logTone": "amber"
+        }
+      },
+      {
+        "id": "done",
+        "type": "action",
+        "position": {
+          "x": 512,
+          "y": 240
+        },
+        "data": {
+          "kind": "log",
+          "parameter": "Завершены 8 тестовых проходов.",
+          "timeout": 10000
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "start-fixture",
+        "source": "start",
+        "target": "fixture",
+        "type": "smoothstep"
+      },
+      {
+        "id": "fixture-loop",
+        "source": "fixture",
+        "target": "loop",
+        "type": "smoothstep"
+      },
+      {
+        "id": "loop-random",
+        "source": "loop",
+        "target": "random",
+        "sourceHandle": "body",
+        "label": "Тело",
+        "type": "smoothstep"
+      },
+      {
+        "id": "random-check",
+        "source": "random",
+        "target": "check",
+        "type": "smoothstep"
+      },
+      {
+        "id": "check-case-a",
+        "source": "check",
+        "target": "case-a",
+        "sourceHandle": "yes",
+        "label": "Да",
+        "type": "smoothstep"
+      },
+      {
+        "id": "check-case-b",
+        "source": "check",
+        "target": "case-b",
+        "sourceHandle": "no",
+        "label": "Нет",
+        "type": "smoothstep"
+      },
+      {
+        "id": "case-a-loop",
+        "source": "case-a",
+        "target": "loop",
+        "type": "smoothstep"
+      },
+      {
+        "id": "case-b-loop",
+        "source": "case-b",
+        "target": "loop",
+        "type": "smoothstep"
+      },
+      {
+        "id": "loop-done",
+        "source": "loop",
+        "target": "done",
+        "sourceHandle": "done",
+        "label": "Выход",
+        "type": "smoothstep"
+      }
+    ]
+  },
+  "dependencies": []
+}

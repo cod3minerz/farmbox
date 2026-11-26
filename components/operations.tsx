@@ -1,9 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { Activity, ArrowUpRight, CalendarDays, ChevronRight, CircleHelp, Clapperboard, Clock3, FileVideo, Globe, HardDrive, Monitor, Plug, Radio, Server, Smartphone } from "./icons";
-import { useState } from "react";
-import { phones, runLabels, type Settings as SettingsData } from "@/lib/demo";
+import { Activity, ArrowUpRight, CalendarDays, ChevronDown, ChevronRight, CircleHelp, Clapperboard, Clock3, FileVideo, Globe, HardDrive, Monitor, Plug, Radio, Server, Smartphone } from "./icons";
+import { Fragment, useState } from "react";
+import { isSimulationRun, phones, runLabels, type Settings as SettingsData } from "@/lib/demo";
 import { updateDemo, useDemo } from "@/lib/store";
 import { cancelDeviceRun, useDeviceRuns } from "@/lib/device-runs-client";
 import { Button, Details, Empty, Frame, PageHeading, PanelHeading, SelectField, Status } from "./ui";
@@ -41,10 +41,12 @@ export function Runs({ initialRun }: { initialRun?: string }) {
   const live = useDeviceRuns();
   const [commandError, setCommandError] = useState("");
   const [id, setId] = useState(initialRun);
+  const [expandedId, setExpandedId] = useState(initialRun);
   const [filter, setFilter] = useState("all");
   const [limit, setLimit] = useState(12);
   const [stepChoice, setStepChoice] = useState<{ runId: string; index: number } | null>(null);
-  const visible = [...live, ...state.runs].filter((run) => filter === "all" || run.status === filter);
+  const visible = [...live, ...state.runs].filter((run) => filter === "all" || run.status === filter)
+    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
   const selected = visible.find((run) => run.id === id) ?? visible[0];
   const stepIndex = selected && stepChoice?.runId === selected.id ? stepChoice.index : 0;
   const step = selected?.steps[stepIndex];
@@ -66,11 +68,11 @@ export function Runs({ initialRun }: { initialRun?: string }) {
   return <Frame inspector={<>
     <PanelHeading title={selected?.workflow ?? "Запуск"} description={selected?.id} icon={<Activity size={18} />} />
     {selected && <div className="panel-block"><Status tone={runTones[selected.status]}>{runLabels[selected.status]}</Status>
-      <Details entries={[["Устройство", selected.device], ...(selected.screen ? [["Экран", selected.screen] as [string, string]] : []), ["Старт", selected.started], ["Шагов", (selected.stepOffset ?? 0) + selected.steps.length]]} />
+      <Details entries={[isSimulationRun(selected) ? ["Режим", "Симуляция"] : ["Устройство", selected.device], ...(selected.screen ? [["Экран", selected.screen] as [string, string]] : []), ["Старт", selected.started], ["Шагов", (selected.stepOffset ?? 0) + selected.steps.length]]} />
       {selected.status === "running" && <Button variant="danger" onClick={stopRun}>{selected.origin === "device" ? "Остановить запуск" : "Остановить симуляцию"}</Button>}
       {commandError && <p role="alert">{commandError}</p>}
     </div>}
-    {step && <div className="panel-block"><h3>{step.label}</h3><Status tone={runTones[step.status]}>{stepLabels[step.status]}</Status><p className="muted">{step.detail}</p></div>}
+    {step && <div className="panel-block"><h3>{step.label}</h3><Status tone={runTones[step.status]}>{stepLabels[step.status]}</Status><p className={`run-step-detail ${step.logTone && step.logTone !== "neutral" ? "tone-" + step.logTone : "muted"}`}>{step.subflow ? step.subflow + " · " : ""}{step.detail}</p></div>}
   </>}>
     <PageHeading title="Запуски" description="История выполнения сценариев" />
     <section className="run-history" aria-labelledby="run-history-title">
@@ -79,10 +81,35 @@ export function Runs({ initialRun }: { initialRun?: string }) {
         <SelectField label="Статус запуска" value={filter} onChange={(value) => { setFilter(value); setLimit(12); }} options={[{ value: "all", label: "Все запуски" }, ...Object.entries(runLabels).map(([value, label]) => ({ value, label }))]} />
       </header>
       {visible.length ? <div className="table-wrap"><table><thead><tr><th scope="col">Сценарий</th><th scope="col">Устройство</th><th scope="col">Время</th><th scope="col">Результат</th></tr></thead><tbody>
-        {displayed.map((run) => <tr key={run.id} className={selected?.id === run.id ? "table-selected" : ""}>
-          <td><button type="button" className="link-button" aria-pressed={selected?.id === run.id} onClick={() => { setId(run.id); setStepChoice(null); }}>{run.workflow}</button><small className="cell-meta">{run.id}</small></td>
-          <td>{run.device}{run.screen && <small className="cell-meta">{run.screen}</small>}</td><td>{run.started}</td><td><Status tone={runTones[run.status]}>{runLabels[run.status]}</Status></td>
-        </tr>)}
+        {displayed.map((run) => {
+          const expanded = expandedId === run.id;
+          const traceId = "steps-" + run.id;
+          const device = isSimulationRun(run) ? "Симуляция" : run.device;
+          return <Fragment key={run.id}>
+            <tr className={selected?.id === run.id ? "table-selected" : ""}>
+              <td><button type="button" className="link-button run-expand" aria-expanded={expanded} aria-controls={expanded ? traceId : undefined}
+                onClick={() => { setId(run.id); setExpandedId(expanded ? undefined : run.id); setStepChoice(null); }}>
+                <ChevronDown size={14} /><span>{run.workflow}<small className="cell-meta run-id">{run.id}</small>
+                  <small className="cell-meta run-mobile-meta">{device} · {run.started}</small></span></button></td>
+              <td>{device}{run.screen && <small className="cell-meta">{run.screen}</small>}</td>
+              <td>{run.started}</td><td><Status tone={runTones[run.status]}>{runLabels[run.status]}</Status></td>
+            </tr>
+            {expanded && <tr className="run-expanded-row"><td colSpan={4}>
+              <section id={traceId} aria-label={"Шаги запуска " + run.id}>
+                {run.steps.length ? <ol className="run-trace-list" role="list">
+                  {run.steps.map((item, index) => <li key={(run.stepOffset ?? 0) + index}><button type="button" className="timeline-row"
+                    aria-pressed={selected?.id === run.id && stepIndex === index}
+                    onClick={() => { setId(run.id); setStepChoice({ runId: run.id, index }); }}>
+                    <span className="step-number" aria-hidden="true">{String((run.stepOffset ?? 0) + index + 1).padStart(2, "0")}</span>
+                    <span><strong>{item.label}</strong><small className={item.logTone ? "tone-" + item.logTone : undefined}>
+                      {item.subflow ? item.subflow + " · " : ""}{item.detail}</small></span>
+                    <Status tone={runTones[item.status]}>{stepLabels[item.status]}</Status>
+                  </button></li>)}
+                </ol> : <p className="muted run-empty-steps">Шагов пока нет.</p>}
+              </section>
+            </td></tr>}
+          </Fragment>;
+        })}
       </tbody></table></div> : <Empty title="В этой выборке запусков нет" detail="Измените фильтр или запустите сценарий в редакторе." />}
       {displayed.length < visible.length && <div className="history-more">
         <Button onClick={() => setLimit(displayed.length + 12)}>Показать ещё</Button>
@@ -90,20 +117,6 @@ export function Runs({ initialRun }: { initialRun?: string }) {
       </div>}
     </section>
 
-    {selected && <section className="run-trace" aria-labelledby="run-trace-title">
-      <header className="run-trace-header">
-        <div><h2 id="run-trace-title">Шаги выбранного запуска</h2><p><strong>{selected.workflow}</strong><span>{selected.id}</span></p></div>
-        <Status tone={runTones[selected.status]}>{runLabels[selected.status]}</Status>
-      </header>
-      <ol className="run-trace-list" role="list">
-        {selected.steps.map((item, index) => <li key={index}><button type="button" className="timeline-row"
-          aria-pressed={stepIndex === index} onClick={() => setStepChoice({ runId: selected.id, index })}>
-          <span className="step-number" aria-hidden="true">{String((selected.stepOffset ?? 0) + index + 1).padStart(2, "0")}</span>
-          <span><strong>{item.label}</strong><small>{item.detail}</small></span>
-          <Status tone={runTones[item.status]}>{stepLabels[item.status]}</Status>
-        </button></li>)}
-      </ol>
-    </section>}
   </Frame>;
 }
 

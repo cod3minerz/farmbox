@@ -1,3 +1,4 @@
+import type { LogTone, NodeLogic } from "./workflow-logic";
 import type { Edge, Node } from "@xyflow/react";
 
 export type DeviceState = "ready" | "busy" | "offline";
@@ -32,12 +33,17 @@ export const nodeCatalog = {
   screenshot: { label: "Скриншот", group: "Устройство", tone: "blue", parameter: "screen.png", description: "Название артефакта." },
   delay: { label: "Задержка", group: "Время", tone: "amber", parameter: "1200", description: "Длительность ожидания в миллисекундах." },
   randomDelay: { label: "Случайная пауза", group: "Время", tone: "amber", parameter: "", description: "Каждый проход выбирает новое время в заданном диапазоне." },
+  call: { label: "Вызвать сценарий", group: "Логика", tone: "purple", parameter: "", description: "Выполняет сохранённый сценарий на текущем экране и возвращается к следующей ноде." },
   stop: { label: "Остановить сценарий", group: "Логика", tone: "red", parameter: "", description: "Завершает текущий запуск, включая повтор с начала." },
   loop: { label: "Повтор", group: "Логика", tone: "purple", parameter: "", description: "Соедините выход «Тело» с первым шагом цикла, а последний шаг верните в эту ноду." },
   home: { label: "Домой", group: "Устройство", tone: "blue", parameter: "", description: "Возврат на главный экран." },
+  wake: { label: "Включить экран", group: "Устройство", tone: "blue", parameter: "", description: "Будит основной экран телефона. Если телефон заблокирован, система сохраняет блокировку." },
   back: { label: "Назад", group: "Устройство", tone: "blue", parameter: "", description: "Системная кнопка «Назад»." },
   wait: { label: "Дождаться элемента", group: "Время", tone: "amber", parameter: "Кнопка записи", description: "Имя или селектор элемента." },
-  condition: { label: "Условие", group: "Логика", tone: "purple", parameter: "true", description: "Для симуляции введите true или false." },
+  setVariable: { label: "Задать переменную", group: "Логика", tone: "purple", parameter: "0", description: "Записывает число, текст или логическое значение." },
+  randomNumber: { label: "Случайное число", group: "Логика", tone: "purple", parameter: "", description: "Генерирует целое число или процент при каждом прохождении ноды." },
+  adjustVariable: { label: "Изменить число", group: "Логика", tone: "purple", parameter: "1", description: "Прибавляет число к существующей переменной. Отрицательное число уменьшает её." },
+  condition: { label: "Условие", group: "Логика", tone: "purple", parameter: "true", description: "Выбирает ветку по постоянному значению или по результату сравнения переменной." },
   request: { label: "HTTP-запрос", group: "Интеграции", tone: "purple", parameter: "GET /clips", description: "Метод и адрес. Симуляция использует модельный ответ." },
   narezai: { label: "Ролик из Narezai", group: "Контент", tone: "purple", parameter: "Готовые клипы", description: "Источник подготовленного ролика." },
   validate: { label: "Проверить видео", group: "Контент", tone: "purple", parameter: "9:16 · MP4", description: "Ожидаемый формат файла." },
@@ -47,19 +53,19 @@ export const nodeCatalog = {
 
 export type NodeKind = keyof typeof nodeCatalog;
 export type NodeSettings = Partial<Record<"x" | "y" | "toX" | "toY" | "duration" | "gap" | "minSeconds" | "maxSeconds" | "count", number>>;
-export type FlowNode = Node<{ kind: NodeKind; parameter: string; timeout: number; settings?: NodeSettings }, "action">;
-export type Workflow = { targets?: string[]; repeat?: boolean; id: string; name: string; version: number; nodes: FlowNode[]; edges: Edge[] };
+export type FlowNode = Node<{ kind: NodeKind; parameter: string; timeout: number; settings?: NodeSettings; logic?: NodeLogic; logTone?: LogTone }, "action">;
+export type Workflow = { dependencies?: Workflow[]; targets?: string[]; repeat?: boolean; id: string; name: string; version: number; nodes: FlowNode[]; edges: Edge[] };
 export type Run = {
   id: string; workflow: string; device: string; started: string;
   status: "success" | "error" | "running" | "cancelled";
-  origin?: "device";
+  origin?: "device" | "simulation";
   workflowId?: string;
   target?: string;
   screen?: string;
   startedAt?: number;
   scheduleId?: string;
   stepOffset?: number;
-  steps: { at?: number; nodeId?: string; edgeId?: string; label: string; detail: string; status: "success" | "error" | "running" }[];
+  steps: { at?: number; nodeId?: string; edgeId?: string; subflow?: string; logTone?: LogTone; label: string; detail: string; status: "success" | "error" | "running" }[];
 };
 export type Clip = { id: string; title: string; source: string; duration: string; size: string; status: "review" | "approved" };
 export type Publication = {
@@ -126,6 +132,11 @@ export const deviceLabels = { ready: "Готово", busy: "Занято", offli
 export const publishLabels = { draft: "Черновик", scheduled: "В очереди", published: "Подтверждено", cancelled: "Отменено" } as const;
 export const runLabels = { success: "Завершён", error: "Ошибка", running: "В работе", cancelled: "Остановлен" } as const;
 
+export function isSimulationRun(run: Run) {
+  // Older local simulations used createId("RUN"); the seeded examples have short numeric IDs.
+  return run.origin === "simulation" || (run.origin === undefined && /^RUN-[0-9A-F]{8}$/.test(run.id));
+}
+
 export function createId(prefix: string) {
   const value = crypto.getRandomValues(new Uint32Array(1))[0];
   return prefix + "-" + value.toString(16).toUpperCase().padStart(8, "0");
@@ -168,7 +179,7 @@ export function simulate(workflow: Workflow, device?: Phone): Run {
       kind === "delay" && (!parameter.trim() || !Number.isFinite(Number(parameter)) || Number(parameter) < 0) ? "Укажите задержку в миллисекундах." :
       kind === "delay" && Number(parameter) > timeout ? "Задержка превышает тайм-аут." :
       kind === "condition" && !/^(true|false)$/i.test(parameter.trim()) ? "Укажите true или false для примера." : null;
-    run.steps.push({ nodeId: id, edgeId, label: config.label, detail: failure ?? (parameter || "Шаг выполнен в симуляции"), status: failure ? "error" : "success" });
+    run.steps.push({ nodeId: id, edgeId, logTone: cursor.data.logTone, label: config.label, detail: failure ?? (parameter || "Шаг выполнен в симуляции"), status: failure ? "error" : "success" });
     if (failure) return { ...run, status: "error" };
     visited.add(id);
     const branch: "yes" | "no" | null = kind === "condition" ? (parameter.trim().toLowerCase() === "true" ? "yes" : "no") : null;

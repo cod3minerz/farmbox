@@ -1,0 +1,229 @@
+{
+  "format": "hashpix.workflow",
+  "version": 2,
+  "workflow": {
+    "name": "QA · Видеолента — свайп и двойной тап",
+    "repeat": true,
+    "nodes": [
+      {
+        "id": "start",
+        "type": "action",
+        "position": {
+          "x": 0,
+          "y": 0
+        },
+        "data": {
+          "kind": "start",
+          "parameter": "",
+          "timeout": 10000
+        }
+      },
+      {
+        "id": "loop",
+        "type": "action",
+        "position": {
+          "x": 256,
+          "y": 0
+        },
+        "data": {
+          "kind": "loop",
+          "parameter": "",
+          "timeout": 10000,
+          "settings": {
+            "count": 20
+          }
+        }
+      },
+      {
+        "id": "watch",
+        "type": "action",
+        "position": {
+          "x": 512,
+          "y": 0
+        },
+        "data": {
+          "kind": "randomDelay",
+          "parameter": "",
+          "timeout": 20000,
+          "settings": {
+            "minSeconds": 1,
+            "maxSeconds": 15
+          }
+        }
+      },
+      {
+        "id": "sample",
+        "type": "action",
+        "position": {
+          "x": 768,
+          "y": 0
+        },
+        "data": {
+          "kind": "randomNumber",
+          "parameter": "",
+          "timeout": 10000,
+          "logic": {
+            "variable": "sample",
+            "lower": "1",
+            "upper": "100",
+            "randomMode": "integer"
+          }
+        }
+      },
+      {
+        "id": "like-check",
+        "type": "action",
+        "position": {
+          "x": 1024,
+          "y": 0
+        },
+        "data": {
+          "kind": "condition",
+          "parameter": "true",
+          "timeout": 10000,
+          "logic": {
+            "variable": "sample",
+            "operator": "lte",
+            "operand": "60"
+          }
+        }
+      },
+      {
+        "id": "like",
+        "type": "action",
+        "position": {
+          "x": 1280,
+          "y": 0
+        },
+        "data": {
+          "kind": "doubleTap",
+          "parameter": "",
+          "timeout": 10000,
+          "settings": {
+            "x": 50,
+            "y": 50,
+            "gap": 120
+          }
+        }
+      },
+      {
+        "id": "reaction-delay",
+        "type": "action",
+        "position": {
+          "x": 1536,
+          "y": 0
+        },
+        "data": {
+          "kind": "delay",
+          "parameter": "350",
+          "timeout": 10000
+        }
+      },
+      {
+        "id": "next-video",
+        "type": "action",
+        "position": {
+          "x": 1792,
+          "y": 192
+        },
+        "data": {
+          "kind": "swipe",
+          "parameter": "",
+          "timeout": 10000,
+          "settings": {
+            "x": 50,
+            "y": 78,
+            "toX": 50,
+            "toY": 24,
+            "duration": 360
+          }
+        }
+      },
+      {
+        "id": "batch-done",
+        "type": "action",
+        "position": {
+          "x": 512,
+          "y": 240
+        },
+        "data": {
+          "kind": "log",
+          "parameter": "QA: завершён проход по 20 роликам.",
+          "timeout": 10000,
+          "logTone": "green"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "start-loop",
+        "source": "start",
+        "target": "loop",
+        "type": "smoothstep"
+      },
+      {
+        "id": "loop-watch",
+        "source": "loop",
+        "target": "watch",
+        "sourceHandle": "body",
+        "label": "Тело",
+        "type": "smoothstep"
+      },
+      {
+        "id": "watch-sample",
+        "source": "watch",
+        "target": "sample",
+        "type": "smoothstep"
+      },
+      {
+        "id": "sample-like-check",
+        "source": "sample",
+        "target": "like-check",
+        "type": "smoothstep"
+      },
+      {
+        "id": "like-check-like",
+        "source": "like-check",
+        "target": "like",
+        "sourceHandle": "yes",
+        "label": "Да",
+        "type": "smoothstep"
+      },
+      {
+        "id": "like-check-next-video",
+        "source": "like-check",
+        "target": "next-video",
+        "sourceHandle": "no",
+        "label": "Нет",
+        "type": "smoothstep"
+      },
+      {
+        "id": "like-reaction-delay",
+        "source": "like",
+        "target": "reaction-delay",
+        "type": "smoothstep"
+      },
+      {
+        "id": "reaction-delay-next-video",
+        "source": "reaction-delay",
+        "target": "next-video",
+        "type": "smoothstep"
+      },
+      {
+        "id": "next-video-loop",
+        "source": "next-video",
+        "target": "loop",
+        "type": "smoothstep"
+      },
+      {
+        "id": "loop-batch-done",
+        "source": "loop",
+        "target": "batch-done",
+        "sourceHandle": "done",
+        "label": "Выход",
+        "type": "smoothstep"
+      }
+    ]
+  },
+  "dependencies": []
+}

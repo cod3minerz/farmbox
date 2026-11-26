@@ -2,55 +2,62 @@
 
 import * as Popover from "@radix-ui/react-popover";
 import Link from "next/link";
-import { addEdge, Background, Handle, MarkerType, Panel, Position, ReactFlow, useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type NodeProps, type OnSelectionChangeParams, type Viewport } from "@xyflow/react";
-import { Braces, Camera, Check, ChevronRight, Clock3, FitCanvas, GitBranch, Globe, ListChecks, Maximize, Minimize, Minus, MoreHorizontal, MousePointer2, Play, Plus, Radio, Save, ScanLine, Search, Smartphone, Terminal, Trash2, Video } from "./icons";
-import { useCallback, useEffect, useState } from "react";
+import { addEdge, Background, Handle, MarkerType, Panel, Position, ReactFlow, reconnectEdge, useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type NodeProps, type OnSelectionChangeParams, type Viewport } from "@xyflow/react";
+import { ArrowUpRight, Braces, Camera, Check, ChevronRight, Clock3, FitCanvas, GitBranch, Globe, ListChecks, Maximize, Minimize, Minus, MoreHorizontal, MousePointer2, Play, Plus, Radio, Save, ScanLine, Search, Smartphone, Terminal, Trash2, Upload, Video } from "./icons";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createId, gestureTemplate, makeNode, nodeCatalog, phones, runLabels, simulate, type FlowNode, type NodeKind, type Run, type Workflow } from "@/lib/demo";
 import { updateDemo, useDemo, useDemoReady } from "@/lib/store";
 import { beginDeviceRun, cancelDeviceRun, useDeviceRuns } from "@/lib/device-runs-client";
-import { nodeSettings, realNodes, summarizeNode, validateDeviceGraph } from "@/lib/workflow-steps";
+import { linkWorkflowDependencies, nodeSettings, realNodes, summarizeNode, validateDeviceGraph } from "@/lib/workflow-steps";
+import { useWorkflowLibrary } from "@/lib/workflow-library-client";
+import { parseWorkflowFile, serializeWorkflowFile, workflowFileMaxBytes, workflowFileName } from "@/lib/workflow-file";
 import type { AndroidTarget } from "@/lib/engine/contracts";
+import type { LogTone } from "@/lib/workflow-logic";
 import { screenLabel, useAndroidInventory } from "./android-devices";
 import { AndroidVideo } from "./android-video";
 import { GestureRecorder, type RecordedTap } from "./gesture-recorder";
 import { WorkflowSchedules } from "./workflow-schedules";
-import { WorkflowNodeFields } from "./workflow-node-fields";
+import { WorkflowNodeFields, WorkflowNodePreview } from "./workflow-node-fields";
 import { useRunPlayback, WorkflowTransition, type ExecutionEdge } from "./workflow-run-preview";
 import { Button, Details, Empty, Frame, Modal, PageHeading, PanelHeading, SelectField, Status } from "./ui";
 
 const groups = { Триггер: Radio, Устройство: Smartphone, Время: Clock3, Логика: GitBranch, Интеграции: Globe, Контент: Video, Диагностика: Terminal };
 const overrides = { tap: MousePointer2, screenshot: Camera, wait: ScanLine, condition: Braces, publish: ListChecks };
 
-function NodeSymbol({ kind }: { kind: NodeKind }) {
+function NodeSymbol({ kind, logTone }: { kind: NodeKind; logTone?: LogTone }) {
   const config = nodeCatalog[kind];
   const Icon = overrides[kind as keyof typeof overrides] ?? groups[config.group];
-  return <span className={`node-symbol tone-${config.tone}`}><Icon size={16} /></span>;
+  return <span className={`node-symbol tone-${logTone && logTone !== "neutral" ? logTone : config.tone}`}><Icon size={16} /></span>;
 }
 
 function ActionNode({ data, selected }: NodeProps<FlowNode>) {
   const config = nodeCatalog[data.kind];
   const isTrigger = config.group === "Триггер";
-  return <div className={`flow-node ${selected ? "corner-frame" : ""}`}>
+  const branches = data.kind === "condition" ? [["yes", "Да"], ["no", "Нет"]]
+    : data.kind === "loop" ? [["body", "Тело"], ["done", "Выход"]] : null;
+  return <div className={`flow-node ${selected ? "flow-node-selected corner-frame" : ""}`}>
     {!isTrigger && <Handle type="target" position={Position.Left} />}
-    <NodeSymbol kind={data.kind} />
-    <div><strong>{config.label}</strong><small>{summarizeNode(data)}</small></div>
-    {data.kind === "condition" ? <>
-      <Handle id="yes" type="source" position={Position.Right} style={{ top: "34%" }} aria-label="Да" />
-      <Handle id="no" type="source" position={Position.Right} style={{ top: "70%" }} aria-label="Нет" />
-    </> : data.kind === "loop" ? <>
-      <span className="flow-port-labels" aria-hidden="true"><span>Тело</span><span>Выход</span></span>
-      <Handle id="body" type="source" position={Position.Right} style={{ top: "34%" }} aria-label="Тело" />
-      <Handle id="done" type="source" position={Position.Right} style={{ top: "70%" }} aria-label="Выход" />
-    </> : data.kind !== "stop" && <Handle type="source" position={Position.Right} />}
+    <div className="flow-node-heading">
+      <NodeSymbol kind={data.kind} logTone={data.logTone} />
+      <strong>{config.label}</strong>
+    </div>
+    <WorkflowNodePreview node={data} />
+    {branches ? <div className="flow-node-branches">
+      {branches.map(([id, label]) => <div className="flow-node-branch" key={id}>
+        <span>{label}</span><Handle id={id} type="source" position={Position.Right} aria-label={label} />
+      </div>)}
+    </div> : data.kind !== "stop" && <Handle type="source" position={Position.Right} />}
   </div>;
 }
 
 const nodeTypes = { action: ActionNode };
 const edgeTypes = { smoothstep: WorkflowTransition };
-const editorDrafts = new Map<string, {
+type EditorDraft = {
   version: number; nodes: FlowNode[]; edges: Edge[]; selectedId: string; targets?: string[];
   viewport?: Viewport; expanded: boolean; runId: string; repeat: boolean;
-}>();
+};
+const editorDrafts = new Map<string, EditorDraft>();
+const draftKey = (id: string) => "hashpix-scenario-draft:" + id;
 const edgeDefaults = { type: "smoothstep", markerEnd: { type: MarkerType.ArrowClosed, width: 14, height: 14 } };
 
 function CanvasControls({ reveal, autoFit, onView }: {
@@ -90,11 +97,17 @@ function CanvasControls({ reveal, autoFit, onView }: {
 export function Automations() {
   const state = useDemo();
   const ready = useDemoReady();
+  const library = useWorkflowLibrary(ready);
   const [deleting, setDeleting] = useState<Workflow | null>(null);
   const [removing, setRemoving] = useState(false);
   const [removeError, setRemoveError] = useState("");
   const [newDialog, setNewDialog] = useState(false);
+  const [newAction, setNewAction] = useState<"create" | "import" | null>(null);
+  const [newError, setNewError] = useState("");
   const [name, setName] = useState("");
+  const [startingPoint, setStartingPoint] = useState<"blank" | "gestures">("blank");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [fileError, setFileError] = useState<{ title: string; detail: string } | null>(null);
   const workflow = state.workflows.find((item) => item.id === state.selectedWorkflowId) ?? state.workflows[0];
 
   function selectWorkflow(id: string) {
@@ -105,16 +118,11 @@ export function Automations() {
     setRemoving(true);
     setRemoveError("");
     try {
-      const response = await fetch("/api/engine/schedules?workflowId=" + encodeURIComponent(id), { method: "DELETE" });
-      if (!response.ok) {
-        const data = await response.json().catch(() => null) as { message?: string } | null;
-        throw new Error(data?.message ?? "Не удалось удалить расписание сценария.");
-      }
-      updateDemo((previous) => {
-        const workflows = previous.workflows.filter((item) => item.id !== id);
-        return { ...previous, workflows, selectedWorkflowId: workflows.find((item) => item.id === previous.selectedWorkflowId)?.id ?? workflows[0]?.id };
-      });
+      const current = state.workflows.find((entry) => entry.id === id);
+      if (!current) throw new Error("Сценарий был удалён в другой вкладке.");
+      await library.change({ action: "delete", id, version: current.version });
       editorDrafts.delete(id);
+      try { sessionStorage.removeItem(draftKey(id)); } catch { /* Draft storage is optional. */ }
       setDeleting(null);
     } catch (cause) {
       setRemoveError(cause instanceof Error ? cause.message : "Не удалось удалить сценарий.");
@@ -129,56 +137,139 @@ export function Automations() {
     setDeleting(null);
   }
 
-  function insertTemplate() {
-    const template = gestureTemplate();
-    updateDemo((previous) => ({ ...previous, workflows: [...previous.workflows, template], selectedWorkflowId: template.id }));
-  }
-
-  function createWorkflow() {
-    if (!name.trim()) return;
-    const created: Workflow = { id: createId("FLOW"), name: name.trim(), version: 1, nodes: [makeNode("start", "start", 0, 0)], edges: [] };
-    updateDemo((current) => ({ ...current, workflows: [...current.workflows, created], selectedWorkflowId: created.id }));
+  function openNewWorkflow() {
     setName("");
-    setNewDialog(false);
+    setStartingPoint("blank");
+    setNewError("");
+    setNewDialog(true);
   }
 
-  const createActions = <><Button onClick={() => setNewDialog(true)}><Plus size={15} /> Новый сценарий</Button><Button onClick={insertTemplate}>Шаблон жестов</Button></>;
+  async function createWorkflow() {
+    const title = name.trim();
+    if (newAction || (startingPoint === "blank" && !title)) return;
+    const template = startingPoint === "gestures" ? gestureTemplate() : undefined;
+    const created: Workflow = template ? { ...template, name: title || template.name }
+      : { id: createId("FLOW"), name: title, version: 1, nodes: [makeNode("start", "start", 0, 0)], edges: [] };
+    setNewAction("create");
+    setNewError("");
+    try {
+      await library.change({ action: "create", workflows: [created] }, created.id);
+      setName("");
+      setNewDialog(false);
+    } catch (error) {
+      setNewError(error instanceof Error ? error.message : "Не удалось создать сценарий.");
+    } finally {
+      setNewAction(null);
+    }
+  }
+
+  async function importWorkflow(file: File) {
+    if (newAction) return;
+    setNewAction("import");
+    setNewError("");
+    try {
+      if (!/\.hpx$/i.test(file.name)) throw new Error("Выберите файл сценария Farmbox (.hpx).");
+      if (file.size > workflowFileMaxBytes) throw new Error("Файл сценария превышает 256 КБ.");
+      const { root, dependencies } = parseWorkflowFile(await file.text());
+      await library.change({ action: "create", workflows: [root, ...dependencies] }, root.id);
+      setNewDialog(false);
+    } catch (error) {
+      setNewError(error instanceof Error ? error.message : "Не удалось прочитать файл.");
+    } finally {
+      setNewAction(null);
+    }
+  }
+
+  function exportWorkflow(graph: Workflow) {
+    try {
+      const contents = serializeWorkflowFile(linkWorkflowDependencies(graph, state.workflows));
+      const url = URL.createObjectURL(new Blob([contents], { type: "application/json;charset=utf-8" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = workflowFileName(graph.name);
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      setFileError({ title: "Не удалось экспортировать сценарий", detail: error instanceof Error ? error.message : "Не удалось создать файл." });
+    }
+  }
+
+  const createActions = <Button onClick={openNewWorkflow} disabled={!library.loaded}><Plus size={15} /> Новый сценарий</Button>;
 
   return <>
-    {workflow ? <Editor key={workflow.id + (ready ? "-loaded" : "-initial")} workflow={workflow} picker={
+    <input ref={fileInput} type="file" accept=".hpx" hidden onChange={(event) => {
+      const file = event.currentTarget.files?.[0];
+      event.currentTarget.value = "";
+      if (file) void importWorkflow(file);
+    }} />
+    {workflow ? <Editor key={workflow.id + (library.loaded ? "-loaded" : "-cache")} workflow={workflow} onExport={exportWorkflow} canSave={library.loaded}
+      libraryError={library.error} refreshLibrary={library.refresh} onSave={(updated, previousVersion) =>
+        library.change({ action: "save", id: updated.id, version: previousVersion, workflow: updated })} picker={(exportCurrent) =>
       <><SelectField className="workflow-picker" label="Выбрать сценарий" value={workflow.id} onChange={selectWorkflow} options={state.workflows.map((item) => ({ value: item.id, label: item.name }))} />
         <Popover.Root>
           <Popover.Trigger asChild><Button className="icon-button workflow-menu-trigger" title="Действия со сценарием" aria-label="Действия со сценарием"><MoreHorizontal size={17} /></Button></Popover.Trigger>
           <Popover.Portal>
             <Popover.Content className="workflow-actions-popup" align="end" sideOffset={6} collisionPadding={8} aria-label="Действия со сценарием">
-              <Popover.Close asChild><Button variant="ghost" onClick={() => setNewDialog(true)}><Plus size={15} /> Новый сценарий</Button></Popover.Close>
-              <Popover.Close asChild><Button variant="ghost" onClick={insertTemplate}><GitBranch size={15} /> Шаблон жестов</Button></Popover.Close>
+              <Popover.Close asChild><Button variant="ghost" onClick={openNewWorkflow} disabled={!library.loaded}><Plus size={15} /> Новый сценарий</Button></Popover.Close>
+              <Popover.Close asChild><Button variant="ghost" onClick={exportCurrent}><ArrowUpRight size={15} /> Экспорт .hpx</Button></Popover.Close>
               <Popover.Close asChild><Button variant="danger" onClick={() => setDeleting(workflow)}><Trash2 size={15} /> Удалить сценарий</Button></Popover.Close>
             </Popover.Content>
           </Popover.Portal>
         </Popover.Root>
       </>
     } /> : <Frame inspector={null}><PageHeading title="Автоматизации" description="Сценарии и результаты запусков" actions={createActions} />
-      <Empty title="Сценариев пока нет" detail="Создайте сценарий или добавьте шаблон жестов." />
+      {library.error ? <><Empty title="Библиотека недоступна" detail={library.error} />
+        <Button onClick={() => void library.refresh()}>Повторить</Button></>
+        : <Empty title={library.loaded ? "Сценариев пока нет" : "Открываем сценарии"} detail="Создайте сценарий или добавьте шаблон жестов." />}
     </Frame>}
+    {fileError && <Modal title={fileError.title} onClose={() => setFileError(null)}>
+      <p className="dialog-note">{fileError.detail}</p>
+      <div className="dialog-actions"><Button autoFocus onClick={() => setFileError(null)}>Закрыть</Button></div>
+    </Modal>}
     {deleting && <Modal title="Удалить сценарий?" onClose={closeRemoval}>
       <p className="dialog-note">«{deleting.name}» и его расписания будут удалены. История запусков сохранится.</p>
       {removeError && <p role="alert">{removeError}</p>}
       <div className="dialog-actions"><Button autoFocus onClick={closeRemoval} disabled={removing}>Отмена</Button><Button variant="danger" disabled={removing} onClick={() => void removeWorkflow(deleting.id)}>Удалить сценарий</Button></div>
     </Modal>}
-    {newDialog && <Modal title="Новый сценарий" onClose={() => setNewDialog(false)}>
-      <form onSubmit={(event) => { event.preventDefault(); createWorkflow(); }}>
-        <label className="field">Название<input className="control" autoFocus value={name} onChange={(event) => setName(event.target.value)} maxLength={64} required /></label>
-        <div className="dialog-actions"><Button type="submit" variant="primary" disabled={!name.trim()}>Создать сценарий</Button></div>
+    {newDialog && <Modal title="Новый сценарий" onClose={() => { if (!newAction) setNewDialog(false); }}>
+      <form onSubmit={(event) => { event.preventDefault(); void createWorkflow(); }}>
+        <div className="field"><span>Основа сценария</span><SelectField label="Основа сценария" value={startingPoint}
+          options={[{ value: "blank", label: "Пустой сценарий" }, { value: "gestures", label: "Шаблон жестов" }]}
+          onChange={setStartingPoint} /></div>
+        <label className="field">Название<input className="control" autoFocus value={name} onChange={(event) => setName(event.target.value)}
+          placeholder={startingPoint === "gestures" ? "Имя из шаблона" : undefined} maxLength={64} required={startingPoint === "blank"} /></label>
+        {newError && <p className="tone-red" role="alert">{newError}</p>}
+        <div className="dialog-actions">
+          <Button type="button" onClick={() => fileInput.current?.click()} disabled={Boolean(newAction)}>
+            <Upload size={15} /> {newAction === "import" ? "Импортируем…" : "Импорт .hpx"}
+          </Button>
+          <Button type="submit" variant="primary" disabled={Boolean(newAction) || (startingPoint === "blank" && !name.trim())}>
+            {newAction === "create" ? "Создаём…" : "Создать сценарий"}
+          </Button>
+        </div>
       </form>
     </Modal>}
   </>;
 }
 
-function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactNode }) {
+function Editor({ workflow, picker, onExport, canSave, libraryError, refreshLibrary, onSave }: {
+  workflow: Workflow;
+  picker: (exportCurrent: () => void) => ReactNode;
+  onExport: (graph: Workflow) => void;
+  canSave: boolean;
+  libraryError: string;
+  refreshLibrary: () => Promise<void>;
+  onSave: (graph: Workflow, previousVersion: number) => Promise<void>;
+}) {
   const state = useDemo();
   const [draft] = useState(() => {
-    const stored = editorDrafts.get(workflow.id);
+    let stored = editorDrafts.get(workflow.id);
+    if (!stored) {
+      try { stored = JSON.parse(sessionStorage.getItem(draftKey(workflow.id)) ?? "null") ?? undefined; }
+      catch { /* The saved scenario is available on disk. */ }
+    }
     return stored?.version === workflow.version ? stored : undefined;
   });
   const initialNode = draft?.selectedId ?? workflow.nodes[1]?.id ?? workflow.nodes[0]?.id ?? "";
@@ -190,10 +281,13 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
   const [viewport, setViewport] = useState(draft?.viewport);
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [baseVersion, setBaseVersion] = useState(workflow.version);
   const [expanded, setExpanded] = useState(draft?.expanded ?? false);
   const [picking, setPicking] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [showSchedules, setShowSchedules] = useState(false);
+  const [scheduledGraph, setScheduledGraph] = useState<Workflow | null>(null);
   const [repeat, setRepeat] = useState(draft?.repeat ?? workflow.repeat ?? false);
   const [configuredTargets, setConfiguredTargets] = useState(draft?.targets ?? workflow.targets);
   const [targetDialog, setTargetDialog] = useState(false);
@@ -202,8 +296,12 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
   const [runId, setRunId] = useState(draft?.runId ?? "");
   const [playRunId, setPlayRunId] = useState("");
   const [runError, setRunError] = useState("");
+  const reconnecting = useRef<string | null>(null);
+  const movingFromSource = useRef<Edge | null>(null);
   const inventory = useAndroidInventory();
   const devices = inventory.devices.filter((device) => device.state === "ready");
+  const availableWorkflows = state.workflows.filter((entry) => entry.id !== workflow.id);
+  const workflowNames = new Map(availableWorkflows.map((entry) => [entry.id, entry.name]));
   const targets = devices.flatMap((device) => [
     { key: device.serial + "/main", label: "Основной экран", device: device.model, serial: device.serial, screen: undefined },
     ...inventory.screens.filter((screen) => screen.serial === device.serial && !screen.awaitingConfirmation).map((screen) => ({
@@ -225,8 +323,19 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
   const playback = useRunPlayback(runResult, playRunId);
 
   useEffect(() => {
-    editorDrafts.set(workflow.id, { version: workflow.version, nodes, edges, selectedId, targets: configuredTargets, viewport, expanded, runId, repeat });
-  }, [workflow.id, workflow.version, nodes, edges, selectedId, configuredTargets, viewport, expanded, runId, repeat]);
+    if (!canSave) return;
+    const current = { version: baseVersion, nodes, edges, selectedId, targets: configuredTargets, viewport, expanded, runId, repeat };
+    editorDrafts.set(workflow.id, current);
+    function persistDraft() {
+      try { sessionStorage.setItem(draftKey(workflow.id), JSON.stringify(current)); } catch { /* The draft remains in memory. */ }
+    }
+    const timer = setTimeout(persistDraft, 300);
+    window.addEventListener("pagehide", persistDraft);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("pagehide", persistDraft);
+    };
+  }, [canSave, workflow.id, baseVersion, nodes, edges, selectedId, configuredTargets, viewport, expanded, runId, repeat]);
 
   const onSelectionChange = useCallback(({ nodes: selection }: OnSelectionChangeParams<FlowNode, Edge>) => {
     if (selection.length === 1) setSelectedId(selection[0].id);
@@ -288,10 +397,34 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
     setRecording(false);
   }
 
+  function edgeLabel(sourceHandle: string | null | undefined) {
+    return { yes: "Да", no: "Нет", body: "Тело", done: "Выход" }[sourceHandle ?? ""];
+  }
+
   function onConnect(connection: Connection) {
-    const label = { yes: "Да", no: "Нет", body: "Тело", done: "Выход" }[connection.sourceHandle ?? ""];
+    const existing = movingFromSource.current;
+    if (existing) {
+      moveTransition(existing, connection);
+      return;
+    }
+    const label = edgeLabel(connection.sourceHandle);
     setEdges((previous) => addEdge({ ...connection, label }, previous));
     setNotice("");
+  }
+
+  function moveTransition(edge: Edge, connection: Connection) {
+    setEdges((current) => reconnectEdge(edge, connection, current, { shouldReplaceId: false })
+      .map((entry) => entry.id === edge.id ? { ...entry, label: edgeLabel(connection.sourceHandle) } : entry));
+    setNotice("");
+  }
+
+  function disconnectOnPane(event: MouseEvent | TouchEvent, edge: Edge, valid: boolean | null) {
+    const point = "changedTouches" in event ? event.changedTouches[0] : event;
+    const underPointer = point && document.elementFromPoint(point.clientX, point.clientY);
+    if (!valid && underPointer?.classList.contains("react-flow__pane")) {
+      setEdges((current) => current.filter((entry) => entry.id !== edge.id));
+      setNotice("");
+    }
   }
 
   function updateNode(patch: Partial<FlowNode["data"]>) {
@@ -299,11 +432,32 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
     setNotice("");
   }
 
-  function save() {
+  async function save() {
+    if (!canSave || saving) return;
+    setSaving(true);
+    setSaveError("");
+    setNotice("");
     const cleanNodes = nodes.map(({ id, data, position, type }) => ({ id, data, position, type }));
     const cleanEdges = edges.map(({ id, source, target, sourceHandle, targetHandle, label, type }) => ({ id, source, target, sourceHandle, targetHandle, label, type }));
-    updateDemo((state) => ({ ...state, workflows: state.workflows.map((entry) => entry.id === workflow.id ? { ...entry, version: entry.version + 1, nodes: cleanNodes, edges: cleanEdges, targets: targetKeys, repeat } : entry) }));
-    setNotice("Версия сохранена.");
+    try {
+      await onSave({ ...workflow, version: baseVersion + 1, nodes: cleanNodes, edges: cleanEdges, targets: targetKeys, repeat }, baseVersion);
+      setBaseVersion(baseVersion + 1);
+      setNotice("Версия сохранена.");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Не удалось сохранить сценарий.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function prepareGraph() {
+    return linkWorkflowDependencies({ ...workflow, nodes, edges, repeat }, state.workflows);
+  }
+
+  function openSchedules() {
+    setRunError("");
+    try { setScheduledGraph(prepareGraph()); }
+    catch (error) { setRunError(error instanceof Error ? error.message : "Проверьте вложенные сценарии."); }
   }
 
   async function runOnPhone() {
@@ -311,7 +465,7 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
     setRunError("");
     setBusy(true);
     try {
-      const [run] = await beginDeviceRun({ ...workflow, nodes, edges, repeat }, outputs);
+      const [run] = await beginDeviceRun(prepareGraph(), outputs);
       setRunId(run.id);
       setPlayRunId(run.id);
     } catch (error) {
@@ -322,23 +476,32 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
   function run() {
     setRunError("");
     const graph = { ...workflow, nodes, edges };
-    let result: Run;
-    if (nodes.every((node) => realNodes.has(node.data.kind)) && nodes.some((node) => node.data.kind === "loop" || node.data.kind === "randomDelay")) {
+    const startedAt = Date.now();
+    let outcome: Pick<Run, "status" | "steps">;
+    const runtimeLogic = nodes.some((node) => ["call", "condition", "setVariable", "adjustVariable", "randomNumber"].includes(node.data.kind));
+    if (runtimeLogic || (nodes.every((node) => realNodes.has(node.data.kind)) && nodes.some((node) => node.data.kind === "loop" || node.data.kind === "randomDelay"))) {
       try {
-        const steps = validateDeviceGraph(graph).map(({ node, detail, edgeId }) => {
+        const steps = Array.from(validateDeviceGraph(runtimeLogic ? prepareGraph() : graph, runtimeLogic)(), ({ node, detail, edgeId, canvasNodeId, subflow }) => {
           const setting = nodeSettings(node.data);
           const pause = (setting.minSeconds + Math.random() * (setting.maxSeconds - setting.minSeconds)).toFixed(2) + " с";
-          return { nodeId: node.id, edgeId, label: nodeCatalog[node.data.kind].label, status: "success" as const,
+          return { nodeId: canvasNodeId, edgeId, subflow, logTone: node.data.logTone, label: nodeCatalog[node.data.kind].label, status: "success" as const,
             detail: detail ?? (node.data.kind === "randomDelay" ? pause : summarizeNode(node.data)) };
         });
-        result = { id: createId("RUN"), workflow: workflow.name, workflowId: workflow.id, device: "Симуляция", started: "Сейчас", status: "success", steps };
+        outcome = { status: "success", steps };
       } catch (error) {
-        setRunError(error instanceof Error ? error.message : "Проверьте граф.");
-        return;
+        const detail = error instanceof Error ? error.message : "Проверьте граф.";
+        setRunError(detail);
+        outcome = { status: "error", steps: [{ label: "Проверка графа", detail, status: "error" }] };
       }
     } else {
-      result = simulate(graph, phones[0]);
+      outcome = simulate(graph, phones[0]);
     }
+    const result: Run = {
+      status: outcome.status, steps: outcome.steps.map((step) => ({ ...step, at: startedAt })),
+      id: createId("RUN"), workflow: workflow.name, workflowId: workflow.id, origin: "simulation",
+      device: "Симуляция", startedAt,
+      started: new Intl.DateTimeFormat("ru", { dateStyle: "short", timeStyle: "short" }).format(startedAt),
+    };
     updateDemo((state) => ({ ...state, runs: [result, ...state.runs] }));
     setRunId(result.id);
     setPlayRunId(result.id);
@@ -350,18 +513,21 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
       <Button aria-pressed={inspectorTab === "node"} disabled={!selected} onClick={() => setInspectorTab("node")}>Нода</Button>
     </div>
     {inspectorTab === "node" && selected && config ? <>
-      <PanelHeading title={config.label} description={config.group} icon={<NodeSymbol kind={selected.data.kind} />} />
+      <PanelHeading title={config.label} description={config.group} icon={<NodeSymbol kind={selected.data.kind} logTone={selected.data.logTone} />} />
       <div className="panel-block"><h3>Параметры ноды</h3><p className="muted">{config.description}</p>
         {!realNodes.has(selected.data.kind) && <Status tone="amber">Только симуляция</Status>}
-        <WorkflowNodeFields node={selected.data} change={updateNode} pick={captureTarget ? () => setPicking(true) : undefined} />
-        <label className="field">Тайм-аут, мс<input className="control" type="number" min={1} value={selected.data.timeout || ""} onChange={(event) => updateNode({ timeout: Number(event.target.value) })} /></label>
+        <WorkflowNodeFields node={selected.data} change={updateNode} pick={captureTarget ? () => setPicking(true) : undefined}
+          workflows={availableWorkflows} variables={[...new Set(nodes.flatMap((node) =>
+            (node.data.kind === "randomNumber" || node.data.kind === "setVariable") && node.data.logic?.variable ? [node.data.logic.variable] : []))]} />
+        {selected.data.kind !== "call" && <label className="field">Тайм-аут, мс<input className="control" type="number" min={1} value={selected.data.timeout || ""} onChange={(event) => updateNode({ timeout: Number(event.target.value) })} /></label>}
       </div>
       <div className="panel-block"><h3>Переходы</h3><Details entries={[["Входов", edges.filter((edge) => edge.target === selected.id).length], ["Выходов", edges.filter((edge) => edge.source === selected.id).length]]} />
         <Button variant="danger" onClick={() => { setNodes((previous) => previous.filter((node) => node.id !== selected.id)); setEdges((previous) => previous.filter((edge) => edge.source !== selected.id && edge.target !== selected.id)); setSelectedId(""); setInspectorTab("scenario"); setNotice(""); }}><Trash2 size={14} /> Удалить ноду</Button>
       </div>
     </> : <>
       <PanelHeading title={workflow.name} description={`Версия ${workflow.version} · ${nodes.length} нод`} icon={<GitBranch size={18} />} />
-      <div className="panel-block editor-scenario-actions">{picker}</div>
+      {libraryError && <div className="panel-block" role="alert"><p>{libraryError}</p><Button onClick={() => void refreshLibrary()}>Повторить</Button></div>}
+      <div className="panel-block editor-scenario-actions">{picker(() => onExport({ ...workflow, nodes, edges, repeat }))}</div>
       <div className="panel-block">
         <h3>Запуск</h3>
         {chosen.length > 0 && <ul className="editor-target-summary">{chosen.map((item) => <li key={item.key}>{item.label}<small>{item.device}</small></li>)}</ul>}
@@ -373,7 +539,7 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
           <Button variant="primary" disabled={!chosen.length || unavailable > 0 || busy || blocked} onClick={() => void runOnPhone()}><Play size={14} /> Запустить</Button>
           <Button onClick={run} disabled={busy}>Симуляция</Button>
         </div>
-        <Button onClick={() => setShowSchedules(true)}><Clock3 size={15} /> Расписание</Button>
+        <Button onClick={openSchedules}><Clock3 size={15} /> Расписание</Button>
         {runError && <p role="alert">{runError}</p>}
         {runResult && <div className="run-preview" role="status">
           <Status tone={runResult.status === "running" || playback.presenting ? "blue" : runResult.status === "error" ? "red" : runResult.status === "success" ? "green" : "neutral"}>{playback.presenting ? "В работе" : runLabels[runResult.status]}</Status>
@@ -390,11 +556,12 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
       <div className="editor-toolbar" role="group" aria-label="Инструменты холста">
         <div className="editor-toolbar-group">
           <Button onClick={() => setCatalog(true)} aria-label="Добавить ноду" title="Добавить ноду"><Plus size={15} /><span className="editor-toolbar-label">Добавить ноду</span></Button>
-          <Button onClick={() => setTargetDialog(true)}><Smartphone size={15} /> Экраны{targetKeys.length ? ` · ${targetKeys.length}` : ""}</Button>
+          <Button onClick={() => setTargetDialog(true)} aria-label="Экраны" title="Экраны"><Smartphone size={15} />
+            <span className="editor-toolbar-label">Экраны{targetKeys.length ? ` · ${targetKeys.length}` : ""}</span></Button>
         </div>
         <div className="editor-toolbar-group">
           {notice && <span className="editor-save-note" role="status"><Check size={13} /> {notice}</span>}
-          <Button onClick={save} aria-label="Сохранить" title="Сохранить"><Save size={14} /><span className="editor-toolbar-label">Сохранить</span></Button>
+          <Button onClick={() => void save()} disabled={!canSave || saving} aria-label="Сохранить" title="Сохранить"><Save size={14} /><span className="editor-toolbar-label">Сохранить</span></Button>
           <Button className="icon-button" onClick={() => setExpanded(!expanded)} aria-pressed={expanded}
             title={expanded ? "Свернуть холст" : "Развернуть холст"} aria-label={expanded ? "Свернуть холст" : "Развернуть холст"}>{expanded ? <Minimize size={17} /> : <Maximize size={17} />}</Button>
         </div>
@@ -402,7 +569,9 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
       <ReactFlow<FlowNode, Edge>
         nodes={nodes.map((node) => {
           const status = playback.nodeStates.get(node.id);
-          return status ? { ...node, className: "workflow-node-" + status } : node;
+          const canvasNode = node.data.kind === "call"
+            ? { ...node, data: { ...node.data, parameter: workflowNames.get(node.data.parameter) ?? "Выберите сценарий" } } : node;
+          return status ? { ...canvasNode, className: "workflow-node-" + status } : canvasNode;
         })}
         edges={edges.map((edge): ExecutionEdge => {
           const pulse = playback.pulse?.edgeId === edge.id ? playback.pulse.key : undefined;
@@ -410,16 +579,36 @@ function Editor({ workflow, picker }: { workflow: Workflow; picker: React.ReactN
         })} nodeTypes={nodeTypes} edgeTypes={edgeTypes} defaultEdgeOptions={edgeDefaults} proOptions={{ hideAttribution: true }}
         onNodesChange={(changes) => { onNodesChange(changes); if (changes.some((change) => change.type !== "select" && change.type !== "dimensions")) setNotice(""); }}
         onEdgesChange={(changes) => { onEdgesChange(changes); if (changes.some((change) => change.type !== "select")) setNotice(""); }}
-        onConnect={onConnect} onNodeClick={(_, node) => { setSelectedId(node.id); setInspectorTab("node"); }} onPaneClick={() => { setSelectedId(""); setInspectorTab("scenario"); }}
+        onConnect={onConnect}
+        onConnectStart={(_, { nodeId, handleId, handleType }) => {
+          if (reconnecting.current || handleType !== "source") return;
+          movingFromSource.current = edges.find((edge) => edge.source === nodeId && (edge.sourceHandle ?? null) === handleId) ?? null;
+        }}
+        onConnectEnd={(event, connection) => {
+          const edge = movingFromSource.current;
+          movingFromSource.current = null;
+          if (edge) disconnectOnPane(event, edge, connection.isValid);
+        }}
+        onReconnectStart={(_, edge) => { reconnecting.current = edge.id; }}
+        onReconnect={moveTransition}
+        onReconnectEnd={(event, edge, _, connection) => {
+          reconnecting.current = null;
+          disconnectOnPane(event, edge, connection.isValid);
+        }}
+        onNodeClick={(_, node) => { setSelectedId(node.id); setInspectorTab("node"); }} onPaneClick={() => { setSelectedId(""); setInspectorTab("scenario"); }}
         onSelectionChange={onSelectionChange}
         isValidConnection={(edge) => edge.source !== edge.target && nodes.find((node) => node.id === edge.source)?.data.kind !== "stop" &&
-          nodes.find((node) => node.id === edge.target)?.data.kind !== "start" && !edges.some((entry) => entry.source === edge.source && (entry.sourceHandle ?? null) === (edge.sourceHandle ?? null))}
+          nodes.find((node) => node.id === edge.target)?.data.kind !== "start" && !edges.some((entry) =>
+            entry.id !== (reconnecting.current ?? movingFromSource.current?.id) && entry.source === edge.source && (entry.sourceHandle ?? null) === (edge.sourceHandle ?? null))}
         defaultViewport={draft?.viewport} onMoveEnd={(event, next) => { if (event) setViewport(next); }} fitView={!draft?.viewport} fitViewOptions={{ maxZoom: 1.12, padding: 0.08 }} minZoom={0.2} panOnScroll zoomOnScroll={false} colorMode="dark" snapToGrid snapGrid={[16, 16]}>
-        <Background gap={16} size={1} color="#303035" /><CanvasControls reveal={reveal} autoFit={viewport === undefined} onView={setViewport} />
+        <Background gap={16} size={1} color="var(--line)" /><CanvasControls reveal={reveal} autoFit={viewport === undefined} onView={setViewport} />
       </ReactFlow>
     </div>
-    {showSchedules && <WorkflowSchedules workflow={{ ...workflow, nodes, edges, repeat }} targets={unavailable ? [] : outputs}
-      labels={chosen.map((item) => item.device + " · " + item.label)} timezone={state.settings.timezone} onClose={() => setShowSchedules(false)} />}
+    {saveError && <Modal title="Не удалось сохранить сценарий" onClose={() => setSaveError("")}>
+      <p>{saveError}</p><div className="dialog-actions"><Button onClick={() => setSaveError("")}>Закрыть</Button></div>
+    </Modal>}
+    {scheduledGraph && <WorkflowSchedules workflow={scheduledGraph} targets={unavailable ? [] : outputs}
+      labels={chosen.map((item) => item.device + " · " + item.label)} timezone={state.settings.timezone} onClose={() => setScheduledGraph(null)} />}
     {recording && <GestureRecorder targets={chosen} maxNodes={80 - nodes.length} onInsert={insertRecorded} onClose={() => setRecording(false)} />}
     {targetDialog && <Modal title="Экраны для запуска" onClose={() => setTargetDialog(false)}>
       {targets.length ? <>

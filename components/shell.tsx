@@ -1,10 +1,10 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AiRecordVideo, AiSandTimer, CalendarDays, ChevronRight, Command, GitBranch, LayoutDashboard, MirroringScreen, PanelLeft, Plug, Radio, Search, Settings2 } from "./icons";
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import wordmark from "@/lib/hashpix-wordmark.json";
 import { isSection, sections, type Section } from "@/lib/sections";
 import { Button, HeaderActions, Modal, watchViewport } from "./ui";
 
@@ -14,6 +14,12 @@ const groups: { title: string; links: Section[] }[] = [
   { title: "Производство", links: ["content", "publications"] },
   { title: "Система", links: ["integrations", "settings"] },
 ];
+
+const wordmarkRows = wordmark.map((row) => row.replaceAll("|", " "));
+const terminalLogo = [...wordmarkRows, ""].map((row, y) =>
+  Array.from({ length: wordmarkRows[0].length + 1 }, (_, x) => row[x] === "#" ? "solid" :
+    wordmarkRows[y - 1]?.[x - 1] === "#" ? "shadow" : "")
+);
 
 export function Shell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -42,7 +48,10 @@ export function Shell({ children }: { children: ReactNode }) {
     <a className="skip-link" href="#workspace">К рабочей области</a>
     <header className="topbar">
       <div className="brand">
-        <Link href="/" aria-label="Hashpix Automation, устройства"><Image className="brand-logo" src="/hashpix-logo.svg" alt="" width={104} height={21} unoptimized /></Link>
+        <Link href="/" aria-label="Hashpix Automation, устройства"><span className="brand-logo" aria-hidden="true">
+          {terminalLogo.flatMap((row, y) => row.map((pixel, x) => pixel &&
+            <span key={y * row.length + x} className={pixel} style={{ gridArea: `${y + 1} / ${x + 1}` }} />))}
+        </span></Link>
         <Button variant="ghost" className="icon-button rail-toggle" title={railAction} aria-label={railAction} aria-expanded={railExpanded} aria-controls="workspace-navigation"
           onClick={() => setRail(railExpanded ? "closed" : "open")}><PanelLeft size={18} className={railExpanded ? undefined : "panel-arrow-reversed"} /></Button>
       </div>

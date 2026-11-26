@@ -42,6 +42,9 @@ export async function openScrcpy(serial: string, mode: ScrcpyMode) {
   await requireDevice(serial);
   const jar = resolve(process.env.HASHPIX_SCRCPY_SERVER ?? ".engine-tools/scrcpy-server-v" + version);
   if (!existsSync(jar)) throw new EngineError(unavailable);
+  const samsungVideo = !control && /^samsung$/i.test((await adb(
+    ["-s", serial, "shell", "getprop", "ro.product.manufacturer"],
+  ).catch(() => Buffer.alloc(0))).toString().trim());
   const id = (randomBytes(4).readUInt32BE(0) & 0x7fffffff).toString(16).padStart(8, "0");
   const remote = "/data/local/tmp/hashpix-scrcpy-" + id + ".jar";
   let port = "";
@@ -58,20 +61,32 @@ export async function openScrcpy(serial: string, mode: ScrcpyMode) {
     port = (await adb(["-s", serial, "forward", "tcp:0", "localabstract:scrcpy_" + id])).toString().trim();
     if (!/^\d{1,5}$/.test(port)) throw new EngineError(unavailable);
     let displayId: number | undefined;
-    child = spawn(adbExecutable(), ["-s", serial, "shell", "CLASSPATH=" + remote, "app_process", "/",
-      "com.genymobile.scrcpy.Server", version, "scid=" + id, "tunnel_forward=true", "send_device_meta=false",
-      "audio=false", "cleanup=false", "clipboard_autosync=false", virtual ? "log_level=info" : "log_level=error",
-      ...(mode === "video" ? ["control=false", "max_size=1280", "max_fps=30", "video_bit_rate=3000000",
-        "video_codec_options=i-frame-interval=1"] : virtual ? [
-        "control=false", "power_on=false", "new_display=" + virtual.width + "x" + virtual.height + "/" + virtual.dpi,
-        "vd_system_decorations=false", "vd_destroy_content=true", "max_size=1280", "max_fps=15", "video_bit_rate=1000000",
-        "video_codec_options=i-frame-interval=1",
-      ] : ["video=false", "control=true", ...(typeof mode === "object" && "controlDisplay" in mode
-        ? ["display_id=" + mode.controlDisplay, "power_on=false"] : [])])], { stdio: ["ignore", virtual ? "pipe" : "ignore", "ignore"], windowsHide: true });
+    const argv = ["app_process", "/", "com.genymobile.scrcpy.Server", version, "scid=" + id,
+      "tunnel_forward=true", "send_device_meta=false", "audio=false", "cleanup=false"];
+    if (control) {
+      argv.push("video=false", "clipboard_autosync=false", "log_level=error");
+      if (typeof mode === "object" && "controlDisplay" in mode) argv.push("display_id=" + mode.controlDisplay, "power_on=false");
+    } else {
+      argv.push("control=false", "max_size=1280", virtual ? "max_fps=15" : "max_fps=30",
+        virtual ? "video_bit_rate=1000000" : "video_bit_rate=3000000");
+      if (virtual) argv.push("new_display=" + virtual.width + "x" + virtual.height + "/" + virtual.dpi,
+        "vd_system_decorations=false");
+      // Some Samsung media frameworks abort when app_process's argv reaches 256 bytes (scrcpy #7169).
+      if (!samsungVideo) argv.push(virtual ? "log_level=info" : "log_level=error", "video_codec_options=i-frame-interval=1");
+      else if (!virtual) argv.push("video_codec_options=i-frame-interval=1");
+    }
+    child = spawn(adbExecutable(), ["-s", serial, "shell", "CLASSPATH=" + remote, ...argv],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let lastDiagnostic = "";
+    child.stderr?.on("data", (chunk: Buffer) => { lastDiagnostic = (lastDiagnostic + chunk.toString()).slice(-2000); });
+    child.on("close", (code) => {
+      if (code) console.warn("scrcpy exited", { code, mode: control ? "control" : virtual ? "virtual" : "main", detail: lastDiagnostic.trim() });
+    });
     if (child.stdout) {
       createInterface({ input: child.stdout }).on("line", (line) => {
         const match = /\bNew display:.*\(id=(\d+)\)/.exec(line);
         if (match) displayId = Number(match[1]);
+        if (/\[server\]\s+(?:ERROR|WARN):/.test(line)) lastDiagnostic = (lastDiagnostic + "\n" + line).slice(-2000);
       });
     }
     child.on("error", () => undefined);

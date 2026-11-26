@@ -8,6 +8,7 @@ import { adb, androidDisplay, androidFrame, androidInputKey, claimAndroid, Engin
 import { appTaskKey, appTasksByDisplay, launchAndroidApp, listAndroidApps } from "./android-apps";
 import { getVirtualScreen, openVirtualScreen, virtualScreenFrame } from "./android-video";
 import { nodeCatalog, type FlowNode, type Run, type Workflow } from "../demo";
+import type { WorkflowValue } from "../workflow-logic";
 import { nodeSettings, summarizeNode, validateDeviceGraph } from "../workflow-steps";
 
 const folder = resolve(process.env.HASHPIX_ENGINE_DATA ?? ".engine-data");
@@ -155,22 +156,23 @@ type RunningScreen = Awaited<ReturnType<typeof getVirtualScreen>> | undefined;
 
 async function execute(run: Run, target: AndroidTarget, virtual: RunningScreen, graph: ReturnType<typeof validateDeviceGraph>, control: AbortController, repeat: boolean) {
   const signal = repeat ? control.signal : AbortSignal.any([control.signal, AbortSignal.timeout(3600000)]);
+  const variables = new Map<string, WorkflowValue>();
   try {
     do {
-      for (const { node, detail, edgeId } of graph) {
+      for (const { node, detail, edgeId, canvasNodeId, stopRun, subflow } of graph(variables)) {
         signal.throwIfAborted();
         if (run.steps.length >= 500 && repeat) {
           run.steps.splice(0, 1);
           run.stepOffset = (run.stepOffset ?? 0) + 1;
         }
-        const step: Run["steps"][number] = { at: Date.now(), nodeId: node.id, edgeId, label: nodeCatalog[node.data.kind].label, detail: detail ?? summarizeNode(node.data), status: "running" };
+        const step: Run["steps"][number] = { at: Date.now(), nodeId: canvasNodeId, edgeId, subflow, logTone: node.data.logTone, label: nodeCatalog[node.data.kind].label, detail: detail ?? summarizeNode(node.data), status: "running" };
         run.steps.push(step);
         const stop = AbortSignal.any([signal, AbortSignal.timeout(Math.min(620000, node.data.timeout + 40))]);
         if (target.screen && (await getVirtualScreen(target.serial, target.screen)) !== virtual) throw new EngineError("SCREEN_UNAVAILABLE");
         await runStep(target, virtual, run, node, step, stop);
         stop.throwIfAborted();
         step.status = "success";
-        if (node.data.kind === "stop") { run.status = "success"; return; }
+        if (stopRun) { run.status = "success"; return; }
       }
       if (repeat) await delay(350, undefined, { signal });
     } while (repeat);
@@ -195,7 +197,8 @@ async function runStep(target: AndroidTarget, virtual: RunningScreen, run: Run, 
     const time = kind === "delay" ? Number(parameter) : low + Math.floor(Math.random() * (high - low + 1));
     step.detail = (time / 1000).toFixed(2) + " с";
     await delay(time, undefined, { signal }).catch(() => signal.throwIfAborted());
-  } else if (kind === "home" || kind === "back") {
+  } else if (kind === "home" || kind === "back" || kind === "wake") {
+    if (kind === "wake" && display) throw new Error("Нода «Включить экран» доступна для основного экрана.");
     await sendAndroidInput(serial, { kind: "key", key: kind }, run.id, display);
   } else if (kind === "open" && virtual) {
     const app = (await listAndroidApps(serial)).find((entry) => entry.user === virtual.app.user && entry.package === parameter);

@@ -1,7 +1,8 @@
+import wordmark from "../lib/hashpix-wordmark.json" with { type: "json" };
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
@@ -22,6 +23,59 @@ const toolsDirectory = resolve(".engine-tools");
 const scrcpy = "scrcpy-server-v3.3.4";
 const scrcpyDigest = "8588238c9a5a00aa542906b6ec7e6d5541d9ffb9b5d0f6e1bc0e365e2303079e";
 
+function preventIdleSleep() {
+  const windows = process.platform === "win32";
+  if (!windows && process.platform !== "darwin") return;
+
+  // Windows clears the request on thread exit. The pipe also closes if Node is killed.
+  const windowsScript = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Add-Type -Name Awake -Namespace Farmbox -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+private static extern uint SetThreadExecutionState(uint flags);
+
+public static void HoldUntilInputCloses() {
+    const uint continuous = 0x80000000;
+    const uint systemRequired = 0x00000001;
+    if (SetThreadExecutionState(continuous | systemRequired) == 0)
+        throw new System.InvalidOperationException("SetThreadExecutionState failed.");
+
+    try {
+        System.Console.OpenStandardInput().ReadByte();
+    } finally {
+        SetThreadExecutionState(continuous);
+    }
+}
+'@
+[Farmbox.Awake]::HoldUntilInputCloses()
+`;
+  const encoded = Buffer.from(windowsScript, "utf16le").toString("base64");
+  const child = windows
+    ? spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+      stdio: ["pipe", "ignore", "inherit"],
+      windowsHide: true,
+    })
+    : spawn("/usr/bin/caffeinate", ["-i", "-w", String(process.pid)], { stdio: "ignore" });
+
+  let stopping = false;
+  const warn = (reason) => {
+    if (!stopping && !shutdown.signal.aborted) {
+      console.warn(`Не удалось удерживать компьютер от автоматического сна. ${reason}`);
+    }
+  };
+  child.once("error", (error) => warn(error.message));
+  child.once("exit", (code, signal) => warn(`Системная команда завершилась (${signal ?? code}).`));
+  // The child may exit before Node gets a chance to close the pipe.
+  child.stdin?.on("error", () => {});
+
+  return () => {
+    stopping = true;
+    if (windows) child.stdin.end();
+    else child.kill();
+  };
+}
+
 function run(command, args, label, onOutput) {
   shutdown.signal.throwIfAborted();
   return new Promise((resolve, reject) => {
@@ -38,15 +92,45 @@ function run(command, args, label, onOutput) {
   });
 }
 
-const wordmark = [
-  "## ##| ### |#####|## ##|#### |#####|## ##",
-  "## ##|## ##|##   |## ##|## ##| ### |## ##",
-  "## ##|## ##|##   |## ##|## ##| ### | ### ",
-  "#####|#####|#####|#####|#### | ### |  #  ",
-  "## ##|## ##|   ##|## ##|##   | ### | ### ",
-  "## ##|## ##|   ##|## ##|##   | ### |## ##",
-  "## ##|## ##|#####|## ##|##   |#####|## ##",
-];
+async function buildFingerprint(installFingerprint) {
+  const hash = createHash("sha256");
+  const publicEnv = Object.entries(process.env).filter(([key]) => key.startsWith("NEXT_PUBLIC_")).sort();
+  hash.update(JSON.stringify([installFingerprint, process.version, publicEnv]));
+
+  async function addInputs(directory, include) {
+    const entries = (await readdir(directory, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, "en"));
+    for (const entry of entries) {
+      if (!include(entry.name)) continue;
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await addInputs(path, (name) => name !== ".DS_Store");
+      else if (entry.isFile() || entry.isSymbolicLink()) {
+        hash.update(JSON.stringify([path, sha256(await readFile(path))]));
+      }
+    }
+  }
+
+  await addInputs(".", (name) => ["app", "components", "lib", "public", "package.json", "tsconfig.json", "jsconfig.json",
+    ".env", ".env.local", ".env.production", ".env.production.local"].includes(name)
+    || /^(?:(?:next|postcss|tailwind)\.config|instrumentation(?:-client)?|proxy|middleware)\./.test(name));
+  return hash.digest("hex");
+}
+
+async function prepareProductionBuild(node, next, installFingerprint) {
+  const buildStamp = resolve(".next/.hashpix-build");
+  const buildId = resolve(".next/BUILD_ID");
+  const before = await buildFingerprint(installFingerprint);
+  const previousBuild = await readFile(buildId, "utf8").catch(() => "");
+  const stamp = await readFile(buildStamp, "utf8").catch(() => "");
+  if (previousBuild && stamp === JSON.stringify([before, previousBuild])) return;
+
+  await rm(buildStamp, { force: true });
+  console.log("Собираем локальную панель…");
+  await run(node, [next, "build"], "Сборка панели");
+  const currentBuild = await readFile(buildId, "utf8").catch(() => "");
+  if (currentBuild && before === await buildFingerprint(installFingerprint)) {
+    await writeFile(buildStamp, JSON.stringify([before, currentBuild]));
+  }
+}
 
 function showReadyScreen(port) {
   const { isTTY, columns, rows } = process.stdout;
@@ -124,9 +208,11 @@ async function prepareAndroidTools() {
   }
 }
 
+let allowIdleSleep;
 try {
   const port = Number(process.env.PORT ?? 3000);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Укажите корректный порт в PORT.");
+  allowIdleSleep = preventIdleSleep();
   const node = process.execPath;
   const next = resolve("node_modules/next/dist/bin/next");
   const installStamp = resolve("node_modules/.hashpix-install");
@@ -138,8 +224,7 @@ try {
     await writeFile(installStamp, fingerprint);
   }
   await prepareAndroidTools();
-  console.log("Собираем локальную панель…");
-  await run(node, [next, "build"], "Сборка панели");
+  await prepareProductionBuild(node, next, fingerprint);
   let ready = false;
   await run(node, [next, "start", "--hostname", "127.0.0.1", "--port", String(port)], "Запуск панели", (line) => {
     console.log(line);
@@ -153,4 +238,6 @@ try {
     console.error(`Не удалось запустить Hashpix Automation. ${error.message}`);
     process.exitCode = 1;
   }
+} finally {
+  allowIdleSleep?.();
 }
